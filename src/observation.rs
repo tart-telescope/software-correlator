@@ -273,6 +273,10 @@ impl Observation {
             "Samples per antenna:  {}",
             self.num_samples()
         ));
+        lines.push(format!(
+            "Duration:             {:.1} ms",
+            self.num_samples() as f64 / self.config.sampling_frequency * 1000.0
+        ));
         lines.join("\n")
     }
 
