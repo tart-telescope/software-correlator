@@ -29,6 +29,8 @@ tart-correlator [OPTIONS]
 | `--channel-width <HZ>` | Polyphase filterbank channel width in Hz (requires `--baseband`) |
 | `-c`, `--correlate` | Correlate all antenna pairs and print visibilities (requires `--baseband`) |
 | `--integration-time <SECS>` | Integration window for correlation in seconds (requires `--correlate`; default: all samples) |
+| `--antenna-positions <FILE>` | Path to JSON file with antenna ENU positions (required for `--save-vis`) |
+| `--save-vis <FILE>` | Save visibilities to an HDF5 file (requires `--correlate`, `--antenna-positions`) |
 | `-h`, `--help` | Print help |
 | `-V`, `--version` | Print version |
 
@@ -97,6 +99,17 @@ tart-correlator --data observation.h5 --baseband --channel-width 100000 --correl
 ```
 
 Computes complex visibilities V_ij = ⟨x_i · conj(x_j)⟩ for all 276 baselines (24 antennas). Output includes raw amplitude/phase and van Vleck-corrected values.
+
+**Save visibilities to HDF5:**
+
+```bash
+tart-correlator --data observation.h5 --baseband --correlate --integration-time 0.01 \
+  --antenna-positions antenna_positions.json \
+  --save-vis visibilities.h5
+```
+
+Writes an HDF5 file with datasets: `vis` (complex64), `baselines`, `config`,
+`timestamp`, `antenna_positions`, `phase_elaz`, `gains`, and `phases`.
 
 ### Combined examples
 
