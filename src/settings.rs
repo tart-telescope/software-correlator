@@ -10,6 +10,8 @@ pub struct Settings {
     #[serde(default)]
     pub bandwidth: f64,
     #[serde(default)]
+    pub baseband_frequency: f64,
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub lat: f64,
@@ -35,6 +37,9 @@ impl Settings {
     }
     pub fn get_bandwidth(&self) -> f64 {
         self.bandwidth
+    }
+    pub fn get_baseband_frequency(&self) -> f64 {
+        self.baseband_frequency
     }
     pub fn get_name(&self) -> &str {
         &self.name
