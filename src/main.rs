@@ -1,4 +1,5 @@
 use clap::Parser;
+use tart_correlator::correlator;
 use tart_correlator::observation::Observation;
 
 /// TART software correlator — load and inspect radio-observation HDF5 files.
@@ -25,6 +26,15 @@ struct Cli {
     /// Default: single channel (full bandwidth).
     #[arg(long = "channel-width")]
     channel_width: Option<f64>,
+
+    /// Correlate all antennas and print visibilities (requires --baseband).
+    #[arg(short, long)]
+    correlate: bool,
+
+    /// Integration time in seconds for correlation (requires --correlate).
+    /// Default: use all available samples.
+    #[arg(long = "integration-time", default_value = "0.0")]
+    integration_time: f64,
 }
 
 fn main() {
@@ -44,6 +54,14 @@ fn main() {
     }
     if cli.channel_width.is_some() && !cli.baseband {
         eprintln!("Error: --channel-width requires --baseband");
+        std::process::exit(1);
+    }
+    if cli.correlate && !cli.baseband {
+        eprintln!("Error: --correlate requires --baseband");
+        std::process::exit(1);
+    }
+    if cli.integration_time != 0.0 && !cli.correlate {
+        eprintln!("Error: --integration-time requires --correlate");
         std::process::exit(1);
     }
 
@@ -107,40 +125,101 @@ fn main() {
             );
             println!("PFB took {:?}", ch_elapsed);
 
-            // Print per-channel power for the first antenna
-            println!("\nPer-channel power (antenna 0, integrated over all time steps, dBFS):");
-            let ant0 = &channelized[0];
-            let mut powers: Vec<(usize, f64)> = ant0
-                .channels
-                .iter()
-                .enumerate()
-                .map(|(ch, data)| {
-                    let power: f64 =
-                        data.iter().map(|c| c.re * c.re + c.im * c.im).sum::<f64>()
-                            / data.len() as f64;
-                    (ch, power)
-                })
-                .collect();
-
-            // Sort by channel index for display
-            powers.sort_by_key(|(ch, _)| *ch);
-
-            let max_power = powers.iter().map(|(_, p)| *p).fold(0.0f64, f64::max);
-            for (ch, power) in &powers {
-                let db = if *power > 0.0 {
-                    10.0 * power.log10()
+            // If correlating, run on channel 0 (DC) as the single channel
+            if cli.correlate {
+                let t0 = Instant::now();
+                let int_time = if cli.integration_time > 0.0 {
+                    cli.integration_time
                 } else {
-                    f64::NEG_INFINITY
+                    n_time as f64 / actual_width // all available time
                 };
-                let db_rel = if max_power > 0.0 {
-                    10.0 * (*power / max_power).log10()
-                } else {
-                    0.0
-                };
-                let freq_mhz = *ch as f64 * actual_width / 1e6;
+                // Collect per-antenna data for channel 0
+                let ch0_data: Vec<Vec<_>> = channelized
+                    .iter()
+                    .map(|ant| ant.channels[0].clone())
+                    .collect();
+                let vis = correlator::correlate_channel(&ch0_data, actual_width, int_time);
+                let corr_elapsed = t0.elapsed();
+
+                println!("\nCorrelation (channel 0, {:.3} s integration):", int_time);
+                println!("Correlation took {:?}", corr_elapsed);
+                println!("Baselines: {}", vis.len());
+                println!("\nVisibilities (amplitude, phase):");
+                for v in &vis {
+                    let amp = v.value.norm();
+                    let phase = v.value.arg();
+                    // Apply van Vleck correction to real and imag parts
+                    let vv_re = correlator::van_vleck_correction(v.value.re);
+                    let vv_im = correlator::van_vleck_correction(v.value.im);
+                    let vv_amp = (vv_re * vv_re + vv_im * vv_im).sqrt();
+                    let vv_phase = vv_im.atan2(vv_re);
+                    println!(
+                        "  baseline ({:2},{:2}):  amp={:.6}  phase={:+.4} rad   (VV-corrected: amp={:.6}  phase={:+.4} rad)",
+                        v.i, v.j, amp, phase, vv_amp, vv_phase,
+                    );
+                }
+            } else {
+                // Print per-channel power for the first antenna
+                println!("\nPer-channel power (antenna 0, integrated over all time steps, dBFS):");
+                let ant0 = &channelized[0];
+                let mut powers: Vec<(usize, f64)> = ant0
+                    .channels
+                    .iter()
+                    .enumerate()
+                    .map(|(ch, data)| {
+                        let power: f64 =
+                            data.iter().map(|c| c.re * c.re + c.im * c.im).sum::<f64>()
+                                / data.len() as f64;
+                        (ch, power)
+                    })
+                    .collect();
+
+                powers.sort_by_key(|(ch, _)| *ch);
+
+                let max_power = powers.iter().map(|(_, p)| *p).fold(0.0f64, f64::max);
+                for (ch, power) in &powers {
+                    let db = if *power > 0.0 {
+                        10.0 * power.log10()
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                    let db_rel = if max_power > 0.0 {
+                        10.0 * (*power / max_power).log10()
+                    } else {
+                        0.0
+                    };
+                    let freq_mhz = *ch as f64 * actual_width / 1e6;
+                    println!(
+                        "  ch {:4}  {:8.3} MHz:  power={:+.2} dB  rel={:+.2} dB",
+                        ch, freq_mhz, db, db_rel
+                    );
+                }
+            }
+        } else if cli.correlate {
+            // Single-channel correlation on the full baseband
+            let t0 = Instant::now();
+            let int_time = if cli.integration_time > 0.0 {
+                cli.integration_time
+            } else {
+                bb.num_samples() as f64 / bb.sample_rate // all available
+            };
+            let vis = correlator::correlate_channel(&bb.data, bb.sample_rate, int_time);
+            let corr_elapsed = t0.elapsed();
+
+            println!("\nCorrelation (single channel, {:.3} s integration):", int_time);
+            println!("Correlation took {:?}", corr_elapsed);
+            println!("Baselines: {}", vis.len());
+            println!("\nVisibilities (amplitude, phase):");
+            for v in &vis {
+                let amp = v.value.norm();
+                let phase = v.value.arg();
+                let vv_re = correlator::van_vleck_correction(v.value.re);
+                let vv_im = correlator::van_vleck_correction(v.value.im);
+                let vv_amp = (vv_re * vv_re + vv_im * vv_im).sqrt();
+                let vv_phase = vv_im.atan2(vv_re);
                 println!(
-                    "  ch {:4}  {:8.3} MHz:  power={:+.2} dB  rel={:+.2} dB",
-                    ch, freq_mhz, db, db_rel
+                    "  baseline ({:2},{:2}):  amp={:.6}  phase={:+.4} rad   (VV-corrected: amp={:.6}  phase={:+.4} rad)",
+                    v.i, v.j, amp, phase, vv_amp, vv_phase,
                 );
             }
         } else {

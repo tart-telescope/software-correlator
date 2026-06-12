@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0] — 2026-06-13
+
+### Added
+- Antenna correlation (`--correlate`): computes complex visibilities for all
+  baselines by direct complex correlation V_ij = ⟨x_i · conj(x_j)⟩.
+- `--integration-time` argument (seconds) to control the correlation integration
+  window.
+- `Visibility` struct: carries baseline indices, complex value, and sample count.
+- `baselines()` helper: generates all N(N-1)/2 antenna pairs.
+- `van_vleck_correction()`: corrects 1-bit quantization bias via sin(π/2 · R).
+- Unit tests for baselines, correlation (in-phase and quadrature), and van Vleck.
+- Works in both single-channel and PFB-channelized modes.
+
 ## [0.2.0] — 2026-06-13
 
 ### Added
