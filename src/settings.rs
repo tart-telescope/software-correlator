@@ -1,7 +1,7 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Telescope config settings, deserialized from the JSON stored in the HDF5 `config` dataset.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     pub num_antenna: u32,
     pub sampling_frequency: f64,

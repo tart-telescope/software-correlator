@@ -1,6 +1,7 @@
 use clap::Parser;
 use tart_correlator::correlator;
 use tart_correlator::observation::Observation;
+use tart_correlator::visibility;
 
 /// TART software correlator — load and inspect radio-observation HDF5 files.
 #[derive(Parser)]
@@ -35,6 +36,14 @@ struct Cli {
     /// Default: use all available samples.
     #[arg(long = "integration-time", default_value = "0.0")]
     integration_time: f64,
+
+    /// Path to antenna positions JSON file (required for --save-vis).
+    #[arg(long = "antenna-positions")]
+    antenna_positions: Option<String>,
+
+    /// Save visibilities to an HDF5 file (requires --correlate, --antenna-positions).
+    #[arg(long = "save-vis")]
+    save_vis: Option<String>,
 }
 
 fn main() {
@@ -62,6 +71,14 @@ fn main() {
     }
     if cli.integration_time != 0.0 && !cli.correlate {
         eprintln!("Error: --integration-time requires --correlate");
+        std::process::exit(1);
+    }
+    if cli.save_vis.is_some() && !cli.correlate {
+        eprintln!("Error: --save-vis requires --correlate");
+        std::process::exit(1);
+    }
+    if cli.save_vis.is_some() && cli.antenna_positions.is_none() {
+        eprintln!("Error: --save-vis requires --antenna-positions <file.json>");
         std::process::exit(1);
     }
 
@@ -148,7 +165,6 @@ fn main() {
                 for v in &vis {
                     let amp = v.value.norm();
                     let phase = v.value.arg();
-                    // Apply van Vleck correction to real and imag parts
                     let vv_re = correlator::van_vleck_correction(v.value.re);
                     let vv_im = correlator::van_vleck_correction(v.value.im);
                     let vv_amp = (vv_re * vv_re + vv_im * vv_im).sqrt();
@@ -157,6 +173,20 @@ fn main() {
                         "  baseline ({:2},{:2}):  amp={:.6}  phase={:+.4} rad   (VV-corrected: amp={:.6}  phase={:+.4} rad)",
                         v.i, v.j, amp, phase, vv_amp, vv_phase,
                     );
+                }
+
+                // Save to HDF5 if requested
+                if let Some(ref save_path) = cli.save_vis {
+                    let ant_pos_path = cli.antenna_positions.as_ref().unwrap();
+                    match save_visibilities(
+                        save_path,
+                        &obs,
+                        &vis,
+                        ant_pos_path,
+                    ) {
+                        Ok(()) => println!("\nVisibilities saved to {save_path}"),
+                        Err(e) => eprintln!("Failed to save visibilities: {e}"),
+                    }
                 }
             } else {
                 // Print per-channel power for the first antenna
@@ -222,6 +252,15 @@ fn main() {
                     v.i, v.j, amp, phase, vv_amp, vv_phase,
                 );
             }
+
+            // Save to HDF5 if requested
+            if let Some(ref save_path) = cli.save_vis {
+                let ant_pos_path = cli.antenna_positions.as_ref().unwrap();
+                match save_visibilities(save_path, &obs, &vis, ant_pos_path) {
+                    Ok(()) => println!("\nVisibilities saved to {save_path}"),
+                    Err(e) => eprintln!("Failed to save visibilities: {e}"),
+                }
+            }
         } else {
             // Single-channel stats
             println!("\nI/Q statistics per antenna (mean_I, mean_Q, rms):");
@@ -250,4 +289,27 @@ fn main() {
             obs.timestamp
         );
     }
+}
+
+/// Helper: extract visibilities and save to HDF5.
+fn save_visibilities(
+    path: &str,
+    obs: &Observation,
+    vis: &[tart_correlator::correlator::Visibility],
+    ant_pos_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ant_pos = visibility::load_antenna_positions(ant_pos_path)?;
+    let vis_values: Vec<_> = vis.iter().map(|v| v.value).collect();
+    let bl_pairs: Vec<_> = vis.iter().map(|v| (v.i, v.j)).collect();
+    let ts = obs.timestamp.to_rfc3339();
+
+    visibility::write_visibilities_hdf5(
+        path,
+        &obs.config,
+        &ts,
+        &bl_pairs,
+        &vis_values,
+        &ant_pos,
+    )?;
+    Ok(())
 }
