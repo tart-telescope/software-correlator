@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use num_complex::Complex64;
+use rayon::prelude::*;
 
 use crate::settings::Settings;
 
@@ -56,7 +57,7 @@ impl ComplexBaseband {
         let actual_width = sample_rate / num_channels as f64;
 
         self.data
-            .iter()
+            .par_iter()
             .map(|ant| {
                 let mut ch = Self::pfb_channelize(ant, num_channels, taps);
                 ch.channel_width = actual_width;
@@ -163,7 +164,7 @@ impl Observation {
     /// convention.
     pub fn means(&self) -> Vec<f64> {
         self.data
-            .iter()
+            .par_iter()
             .map(|ant| {
                 let sum: f64 = ant.iter().map(|&v| v as f64).sum();
                 let n = ant.len() as f64;
@@ -319,7 +320,7 @@ impl Observation {
 
         let baseband_data: Vec<Vec<Complex64>> = self
             .data
-            .iter()
+            .par_iter()
             .map(|ant| {
                 convert_one_antenna(ant, fc, fs_in, decim_factor, &filter)
             })
@@ -468,39 +469,33 @@ fn convert_one_antenna(
 ) -> Vec<Complex64> {
     let n_in = unipolar.len();
     let n_out = n_in / decim_factor;
-    let mut out = Vec::with_capacity(n_out);
-
     let ntaps = filter.len();
     let phase_per_sample = -2.0 * std::f64::consts::PI * fc / fs;
 
-    for i_out in 0..n_out {
-        let i_center = i_out * decim_factor;
+    (0..n_out)
+        .into_par_iter()
+        .map(|i_out| {
+            let i_center = i_out * decim_factor;
 
-        // Apply FIR filter around the decimated sample, then mix down
-        let mut acc = Complex64::new(0.0, 0.0);
-        let tap_start = if i_center >= ntaps / 2 {
-            i_center - ntaps / 2
-        } else {
-            0
-        };
+            let tap_start = if i_center >= ntaps / 2 {
+                i_center - ntaps / 2
+            } else {
+                0
+            };
 
-        for (tap_idx, &coeff) in filter.iter().enumerate() {
-            let sample_idx = tap_start + tap_idx;
-            if sample_idx >= n_in {
-                break;
+            let mut acc = Complex64::new(0.0, 0.0);
+            for (tap_idx, &coeff) in filter.iter().enumerate() {
+                let sample_idx = tap_start + tap_idx;
+                if sample_idx >= n_in {
+                    break;
+                }
+                let bipolar = (unipolar[sample_idx] as f64) * 2.0 - 1.0;
+                let phase = phase_per_sample * sample_idx as f64;
+                let mixer = Complex64::new(phase.cos(), phase.sin());
+                acc += (bipolar * coeff) * mixer;
             }
-            // Convert unipolar (0,1) → bipolar (-1,+1)
-            let bipolar = (unipolar[sample_idx] as f64) * 2.0 - 1.0;
 
-            // Complex mix down: exp(j * phase_per_sample * sample_idx)
-            let phase = phase_per_sample * sample_idx as f64;
-            let mixer = Complex64::new(phase.cos(), phase.sin());
-
-            acc += (bipolar * coeff) * mixer;
-        }
-
-        out.push(acc);
-    }
-
-    out
+            acc
+        })
+        .collect()
 }

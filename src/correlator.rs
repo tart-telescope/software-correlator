@@ -1,4 +1,5 @@
 use num_complex::Complex64;
+use rayon::prelude::*;
 
 /// A single complex visibility for one baseline.
 #[derive(Debug, Clone)]
@@ -53,26 +54,27 @@ pub fn correlate_channel(
     let start = n_total.saturating_sub(n_int);
 
     let bl_pairs = baselines(num_antennas);
-    let mut visibilities = Vec::with_capacity(bl_pairs.len());
 
-    for &(i, j) in &bl_pairs {
-        let xi = &antenna_data[i][start..];
-        let xj = &antenna_data[j][start..];
+    let visibilities: Vec<Visibility> = bl_pairs
+        .par_iter()
+        .map(|&(i, j): &(usize, usize)| {
+            let xi = &antenna_data[i][start..];
+            let xj = &antenna_data[j][start..];
 
-        // V = ⟨x_i · conj(x_j)⟩ = (1/N) Σ x_i[k] · conj(x_j[k])
-        let mut sum = Complex64::new(0.0, 0.0);
-        for k in 0..n_int {
-            sum += xi[k] * xj[k].conj();
-        }
-        let value = sum / n_int as f64;
+            let mut sum = Complex64::new(0.0, 0.0);
+            for k in 0..n_int {
+                sum += xi[k] * xj[k].conj();
+            }
+            let value = sum / n_int as f64;
 
-        visibilities.push(Visibility {
-            i,
-            j,
-            value,
-            n_samples: n_int,
-        });
-    }
+            Visibility {
+                i,
+                j,
+                value,
+                n_samples: n_int,
+            }
+        })
+        .collect();
 
     visibilities
 }

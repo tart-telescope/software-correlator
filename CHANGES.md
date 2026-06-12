@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0] — 2026-06-13
+
+### Added
+- Rayon parallelism: baseband conversion, PFB channelizer, correlator, and
+  means computation now use all available CPU cores.
+  - `to_baseband()`: 15× speedup in release mode (30s → 2.0s).
+  - `channelize()`: 11× speedup (629ms → 56ms).
+  - `correlate_channel()`: 17× speedup (287ms → 17ms).
+  - Integration tests: 7× faster in debug mode (110s → 15s).
+- `--info` now prints observation duration in milliseconds.
+
+### Dependencies
+- Added `rayon` for data-parallelism.
+
 ## [0.3.0] — 2026-06-13
 
 ### Added
