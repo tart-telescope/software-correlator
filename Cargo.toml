@@ -4,9 +4,9 @@ version = "0.4.0"
 edition = "2024"
 description = "Software correlator for the TART radio telescope"
 license = "GPL-3.0"
-repository = "https://github.com/tmolteno/TART"
-homepage = "https://github.com/tmolteno/TART"
-documentation = "https://github.com/tmolteno/TART"
+repository = "https://github.com/tart-telescope/software-correlator"
+homepage = "https://github.com/tart-telescope/software-correlator"
+documentation = "https://github.com/tart-telescope/software-correlator"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
