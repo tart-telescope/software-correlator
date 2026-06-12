@@ -318,11 +318,21 @@ impl Observation {
         // We use a 64-tap windowed-sinc filter.
         let filter = design_lowpass_fir(decim_factor, 64);
 
+        // Pre-compute complex mix-down LUT: mixer[n] = exp(-j 2π fc n / fs)
+        let n_in = self.data.first().map(|a| a.len()).unwrap_or(0);
+        let phase_per_sample = -2.0 * std::f64::consts::PI * fc / fs_in;
+        let mixer: Vec<Complex64> = (0..n_in)
+            .map(|n| {
+                let phase = phase_per_sample * n as f64;
+                Complex64::new(phase.cos(), phase.sin())
+            })
+            .collect();
+
         let baseband_data: Vec<Vec<Complex64>> = self
             .data
             .par_iter()
             .map(|ant| {
-                convert_one_antenna(ant, fc, fs_in, decim_factor, &filter)
+                convert_one_antenna(ant, decim_factor, &filter, &mixer)
             })
             .collect();
 
@@ -460,17 +470,17 @@ fn next_power_of_two(n: usize) -> usize {
 }
 
 /// Convert a single antenna's real unipolar samples to complex baseband.
+///
+/// `mixer` is a pre-computed LUT: mixer[n] = exp(-j 2π fc n / fs).
 fn convert_one_antenna(
     unipolar: &[u8],
-    fc: f64,
-    fs: f64,
     decim_factor: usize,
     filter: &[f64],
+    mixer: &[Complex64],
 ) -> Vec<Complex64> {
     let n_in = unipolar.len();
     let n_out = n_in / decim_factor;
     let ntaps = filter.len();
-    let phase_per_sample = -2.0 * std::f64::consts::PI * fc / fs;
 
     (0..n_out)
         .into_par_iter()
@@ -490,9 +500,7 @@ fn convert_one_antenna(
                     break;
                 }
                 let bipolar = (unipolar[sample_idx] as f64) * 2.0 - 1.0;
-                let phase = phase_per_sample * sample_idx as f64;
-                let mixer = Complex64::new(phase.cos(), phase.sin());
-                acc += (bipolar * coeff) * mixer;
+                acc += (bipolar * coeff) * mixer[sample_idx];
             }
 
             acc
