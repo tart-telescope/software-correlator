@@ -1,5 +1,6 @@
 use clap::Parser;
 use num_complex::Complex64;
+use rayon::prelude::*;
 use tart_correlator::correlator;
 use tart_correlator::observation::Observation;
 use tart_correlator::visibility;
@@ -143,51 +144,74 @@ fn main() {
             );
             println!("PFB took {:?}", ch_elapsed);
 
-            // If correlating, run on channel 0 (DC) as the single channel
+            // If correlating, correlate ALL channels
             if cli.correlate {
                 let t0 = Instant::now();
                 let int_time = if cli.integration_time > 0.0 {
                     cli.integration_time
                 } else {
-                    n_time as f64 / actual_width // all available time
+                    n_time as f64 / actual_width
                 };
-                // Collect per-antenna data for channel 0
-                let ch0_data: Vec<Vec<_>> = channelized
-                    .iter()
-                    .map(|ant| ant.channels[0].clone())
+
+                // Correlate each channel independently (parallel over channels)
+                let all_vis: Vec<Vec<Complex64>> = (0..num_ch)
+                    .into_par_iter()
+                    .map(|ch_idx| {
+                        let ch_data: Vec<Vec<_>> = channelized
+                            .iter()
+                            .map(|ant| ant.channels[ch_idx].clone())
+                            .collect();
+                        let vis = correlator::correlate_channel(&ch_data, actual_width, int_time);
+                        vis.iter().map(|v| v.value).collect()
+                    })
                     .collect();
-                let vis = correlator::correlate_channel(&ch0_data, actual_width, int_time);
                 let corr_elapsed = t0.elapsed();
 
-                println!("\nCorrelation (channel 0, {:.3} s integration):", int_time);
-                println!("Correlation took {:?}", corr_elapsed);
-                println!("Baselines: {}", vis.len());
-                println!("\nVisibilities (amplitude, phase):");
-                for v in &vis {
-                    let amp = v.value.norm();
-                    let phase = v.value.arg();
-                    let vv_re = correlator::van_vleck_correction(v.value.re);
-                    let vv_im = correlator::van_vleck_correction(v.value.im);
-                    let vv_amp = (vv_re * vv_re + vv_im * vv_im).sqrt();
-                    let vv_phase = vv_im.atan2(vv_re);
-                    println!(
-                        "  baseline ({:2},{:2}):  amp={:.6}  phase={:+.4} rad   (VV-corrected: amp={:.6}  phase={:+.4} rad)",
-                        v.i, v.j, amp, phase, vv_amp, vv_phase,
-                    );
-                }
+                println!("\nCorrelation ({num_ch} channels, {:.3} s integration):", int_time);
+                println!("Correlation took {:?} ({:.1} ms/channel)", corr_elapsed,
+                    corr_elapsed.as_secs_f64() * 1000.0 / num_ch as f64);
+                println!("Baselines: {}", all_vis[0].len());
 
                 // Save to HDF5 if requested
                 if let Some(ref save_path) = cli.save_vis {
                     let ant_pos_path = cli.antenna_positions.as_ref().unwrap();
-                    match save_visibilities(
-                        save_path,
-                        &obs,
-                        &vis,
-                        actual_width,
-                        ant_pos_path,
+                    let ant_pos = visibility::load_antenna_positions(ant_pos_path)
+                        .unwrap_or_else(|e| {
+                            eprintln!("Failed to load antenna positions: {e}");
+                            std::process::exit(1);
+                        });
+                    let ts = obs.timestamp.to_rfc3339();
+
+                    // Reconstruct baseline pairs
+                    let ch0_data: Vec<Vec<_>> = channelized
+                        .iter()
+                        .map(|ant| ant.channels[0].clone())
+                        .collect();
+                    let vis_ref = correlator::correlate_channel(&ch0_data, actual_width, int_time);
+                    let bl_pairs: Vec<_> = vis_ref.iter().map(|v| (v.i, v.j)).collect();
+
+                    let vis_3d: Vec<Vec<Vec<Complex64>>> = all_vis
+                        .iter()
+                        .map(|ch_vis| vec![ch_vis.clone()])
+                        .collect();
+                    if let Err(e) = visibility::write_visibilities_hdf5(
+                        save_path, &obs.config, &ts, &bl_pairs, &vis_3d, actual_width, &ant_pos,
                     ) {
-                        Ok(()) => println!("\nVisibilities saved to {save_path}"),
-                        Err(e) => eprintln!("Failed to save visibilities: {e}"),
+                        eprintln!("Failed to save visibilities: {e}");
+                    } else {
+                        println!("Visibilities saved to {save_path}");
+                        print_h5_summary(save_path);
+                    }
+                } else {
+                    // Print per-channel amplitude summary
+                    println!("\nPer-channel visibility amplitude summary:");
+                    println!("{:>5}  {:>10}  {:>10}  {:>10}", "ch", "mean|V|", "max|V|", "min|V|");
+                    for (ch_idx, ch_vis) in all_vis.iter().enumerate() {
+                        let amps: Vec<f64> = ch_vis.iter().map(|v| v.norm()).collect();
+                        let mean: f64 = amps.iter().sum::<f64>() / amps.len() as f64;
+                        let max = amps.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                        let min = amps.iter().cloned().fold(f64::INFINITY, f64::min);
+                        println!("  {:>3}  {:10.6}  {:10.6}  {:10.6}", ch_idx, mean, max, min);
                     }
                 }
             } else {
@@ -241,26 +265,30 @@ fn main() {
             println!("\nCorrelation (single channel, {:.3} s integration):", int_time);
             println!("Correlation took {:?}", corr_elapsed);
             println!("Baselines: {}", vis.len());
-            println!("\nVisibilities (amplitude, phase):");
-            for v in &vis {
-                let amp = v.value.norm();
-                let phase = v.value.arg();
-                let vv_re = correlator::van_vleck_correction(v.value.re);
-                let vv_im = correlator::van_vleck_correction(v.value.im);
-                let vv_amp = (vv_re * vv_re + vv_im * vv_im).sqrt();
-                let vv_phase = vv_im.atan2(vv_re);
-                println!(
-                    "  baseline ({:2},{:2}):  amp={:.6}  phase={:+.4} rad   (VV-corrected: amp={:.6}  phase={:+.4} rad)",
-                    v.i, v.j, amp, phase, vv_amp, vv_phase,
-                );
-            }
 
             // Save to HDF5 if requested
             if let Some(ref save_path) = cli.save_vis {
                 let ant_pos_path = cli.antenna_positions.as_ref().unwrap();
                 match save_visibilities(save_path, &obs, &vis, bb.sample_rate, ant_pos_path) {
-                    Ok(()) => println!("\nVisibilities saved to {save_path}"),
+                    Ok(()) => {
+                        println!("Visibilities saved to {save_path}");
+                        print_h5_summary(save_path);
+                    }
                     Err(e) => eprintln!("Failed to save visibilities: {e}"),
+                }
+            } else {
+                println!("\nVisibilities (amplitude, phase):");
+                for v in &vis {
+                    let amp = v.value.norm();
+                    let phase = v.value.arg();
+                    let vv_re = correlator::van_vleck_correction(v.value.re);
+                    let vv_im = correlator::van_vleck_correction(v.value.im);
+                    let vv_amp = (vv_re * vv_re + vv_im * vv_im).sqrt();
+                    let vv_phase = vv_im.atan2(vv_re);
+                    println!(
+                        "  baseline ({:2},{:2}):  amp={:.6}  phase={:+.4} rad   (VV-corrected: amp={:.6}  phase={:+.4} rad)",
+                        v.i, v.j, amp, phase, vv_amp, vv_phase,
+                    );
                 }
             }
         } else {
@@ -319,4 +347,44 @@ fn save_visibilities(
         &ant_pos,
     )?;
     Ok(())
+}
+
+/// Print a summary of all datasets in an HDF5 file.
+fn print_h5_summary(path: &str) {
+    let h5 = match hdf5_reader::Hdf5File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Could not read back HDF5 file: {e}");
+            return;
+        }
+    };
+    println!("\nHDF5 file summary:");
+    for name in &[
+        "config", "timestamp", "phase_elaz", "baselines",
+        "uvw", "antenna_positions", "gains", "phases",
+        "chan_freq", "chan_width", "vis",
+    ] {
+        if let Ok(ds) = h5.dataset(name) {
+            let shape: Vec<String> = ds.shape().iter().map(|s| s.to_string()).collect();
+            let elem_size = hdf5_reader::dtype_element_size(ds.dtype()).unwrap_or(0);
+            let n_elems: u64 = ds.shape().iter().product();
+            let total_bytes = n_elems * elem_size as u64;
+            println!(
+                "  {:<20}  shape=({})  size={}",
+                name,
+                shape.join(", "),
+                format_bytes(total_bytes),
+            );
+        }
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
