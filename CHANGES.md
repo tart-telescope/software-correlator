@@ -13,10 +13,16 @@
 - PFB --correlate now processes all N_c channels in parallel via rayon.
 - HDF5 output file summary replaces per-baseline visibility printout when
   --save-vis is used.
+- Multi-integration correlation: `correlate_channel_multi()` divides data into
+  N_int sequential integration windows, each correlated independently in
+  parallel.  Output `vis` array grows to (N_c, N_int, N_bl).
 
 ### Changed
+- `correlate_channel()` replaced by `correlate_channel_multi()` returning
+  `Vec<Vec<Visibility>>`.
 - `write_visibilities_hdf5()` signature changed to accept 3D vis array.
-- `save_visibilities()` helper now accepts channel width parameter.
+- `save_visibilities()` helper replaced by `save_vis_multi()` for
+  multi-integration writes.
 
 ### Dependencies
 - Added `hdf5-pure` for pure-Rust HDF5 file writing (no C build deps).
