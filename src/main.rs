@@ -1,4 +1,5 @@
 use clap::Parser;
+use num_complex::Complex64;
 use tart_correlator::correlator;
 use tart_correlator::observation::Observation;
 use tart_correlator::visibility;
@@ -182,6 +183,7 @@ fn main() {
                         save_path,
                         &obs,
                         &vis,
+                        actual_width,
                         ant_pos_path,
                     ) {
                         Ok(()) => println!("\nVisibilities saved to {save_path}"),
@@ -256,7 +258,7 @@ fn main() {
             // Save to HDF5 if requested
             if let Some(ref save_path) = cli.save_vis {
                 let ant_pos_path = cli.antenna_positions.as_ref().unwrap();
-                match save_visibilities(save_path, &obs, &vis, ant_pos_path) {
+                match save_visibilities(save_path, &obs, &vis, bb.sample_rate, ant_pos_path) {
                     Ok(()) => println!("\nVisibilities saved to {save_path}"),
                     Err(e) => eprintln!("Failed to save visibilities: {e}"),
                 }
@@ -296,19 +298,24 @@ fn save_visibilities(
     path: &str,
     obs: &Observation,
     vis: &[tart_correlator::correlator::Visibility],
+    channel_width_hz: f64,
     ant_pos_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ant_pos = visibility::load_antenna_positions(ant_pos_path)?;
-    let vis_values: Vec<_> = vis.iter().map(|v| v.value).collect();
+    let vis_values: Vec<Complex64> = vis.iter().map(|v| v.value).collect();
     let bl_pairs: Vec<_> = vis.iter().map(|v| (v.i, v.j)).collect();
     let ts = obs.timestamp.to_rfc3339();
+
+    // Wrap as 3D: [1 channel, 1 integration, n_baselines]
+    let vis_3d = vec![vec![vis_values]];
 
     visibility::write_visibilities_hdf5(
         path,
         &obs.config,
         &ts,
         &bl_pairs,
-        &vis_values,
+        &vis_3d,
+        channel_width_hz,
         &ant_pos,
     )?;
     Ok(())
