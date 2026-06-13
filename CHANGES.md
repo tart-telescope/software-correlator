@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.0] — 2026-06-14
+
+### Added
+- Visibility HDF5 output (`--save-vis`, `--antenna-positions`): saves correlated
+  visibilities to HDF5 using the pure-Rust `hdf5-pure` crate.
+- CASA MS v2 compatible datasets: `uvw` (N_bl, 3) UVW coordinates, `chan_freq`
+  (N_c) channel center frequencies, `chan_width` (N_c) channel bandwidths.
+- `vis` stored as 3D complex32 array (N_c, N_int, N_bl).
+- `compute_uvw()` and `channel_frequencies()` helper functions.
+- `print_h5_summary()`: prints dataset names, shapes, and sizes after save.
+- PFB --correlate now processes all N_c channels in parallel via rayon.
+- HDF5 output file summary replaces per-baseline visibility printout when
+  --save-vis is used.
+
+### Changed
+- `write_visibilities_hdf5()` signature changed to accept 3D vis array.
+- `save_visibilities()` helper now accepts channel width parameter.
+
+### Dependencies
+- Added `hdf5-pure` for pure-Rust HDF5 file writing (no C build deps).
+
 ## [0.4.0] — 2026-06-13
 
 ### Added
