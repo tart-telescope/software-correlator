@@ -144,7 +144,7 @@ fn main() {
             );
             println!("PFB took {:?}", ch_elapsed);
 
-            // If correlating, correlate ALL channels
+            // If correlating, correlate ALL channels, ALL integrations
             if cli.correlate {
                 let t0 = Instant::now();
                 let int_time = if cli.integration_time > 0.0 {
@@ -154,23 +154,28 @@ fn main() {
                 };
 
                 // Correlate each channel independently (parallel over channels)
-                let all_vis: Vec<Vec<Complex64>> = (0..num_ch)
+                // Returns [channel][integration][baseline]
+                let all_vis: Vec<Vec<Vec<Complex64>>> = (0..num_ch)
                     .into_par_iter()
                     .map(|ch_idx| {
                         let ch_data: Vec<Vec<_>> = channelized
                             .iter()
                             .map(|ant| ant.channels[ch_idx].clone())
                             .collect();
-                        let vis = correlator::correlate_channel(&ch_data, actual_width, int_time);
-                        vis.iter().map(|v| v.value).collect()
+                        let multi = correlator::correlate_channel_multi(&ch_data, actual_width, int_time);
+                        multi.iter()
+                            .map(|vis| vis.iter().map(|v| v.value).collect())
+                            .collect()
                     })
                     .collect();
                 let corr_elapsed = t0.elapsed();
 
-                println!("\nCorrelation ({num_ch} channels, {:.3} s integration):", int_time);
-                println!("Correlation took {:?} ({:.1} ms/channel)", corr_elapsed,
-                    corr_elapsed.as_secs_f64() * 1000.0 / num_ch as f64);
-                println!("Baselines: {}", all_vis[0].len());
+                let n_int = all_vis.first().map(|c| c.len()).unwrap_or(0);
+                let n_bl = all_vis.first().and_then(|c| c.first().map(|t| t.len())).unwrap_or(0);
+
+                println!("\nCorrelation ({num_ch} channels × {n_int} integrations, {:.3} s each):", int_time);
+                println!("Correlation took {:?}", corr_elapsed);
+                println!("Baselines per integration: {n_bl}");
 
                 // Save to HDF5 if requested
                 if let Some(ref save_path) = cli.save_vis {
@@ -182,20 +187,16 @@ fn main() {
                         });
                     let ts = obs.timestamp.to_rfc3339();
 
-                    // Reconstruct baseline pairs
+                    // Baseline pairs from first channel, first integration
                     let ch0_data: Vec<Vec<_>> = channelized
                         .iter()
                         .map(|ant| ant.channels[0].clone())
                         .collect();
-                    let vis_ref = correlator::correlate_channel(&ch0_data, actual_width, int_time);
-                    let bl_pairs: Vec<_> = vis_ref.iter().map(|v| (v.i, v.j)).collect();
+                    let multi_ref = correlator::correlate_channel_multi(&ch0_data, actual_width, int_time);
+                    let bl_pairs: Vec<_> = multi_ref[0].iter().map(|v| (v.i, v.j)).collect();
 
-                    let vis_3d: Vec<Vec<Vec<Complex64>>> = all_vis
-                        .iter()
-                        .map(|ch_vis| vec![ch_vis.clone()])
-                        .collect();
                     if let Err(e) = visibility::write_visibilities_hdf5(
-                        save_path, &obs.config, &ts, &bl_pairs, &vis_3d, actual_width, &ant_pos,
+                        save_path, &obs.config, &ts, &bl_pairs, &all_vis, actual_width, &ant_pos,
                     ) {
                         eprintln!("Failed to save visibilities: {e}");
                     } else {
@@ -203,11 +204,11 @@ fn main() {
                         print_h5_summary(save_path);
                     }
                 } else {
-                    // Print per-channel amplitude summary
-                    println!("\nPer-channel visibility amplitude summary:");
+                    // Print per-channel amplitude summary (first integration only)
+                    println!("\nPer-channel amplitude summary (integration 0):");
                     println!("{:>5}  {:>10}  {:>10}  {:>10}", "ch", "mean|V|", "max|V|", "min|V|");
                     for (ch_idx, ch_vis) in all_vis.iter().enumerate() {
-                        let amps: Vec<f64> = ch_vis.iter().map(|v| v.norm()).collect();
+                        let amps: Vec<f64> = ch_vis[0].iter().map(|v| v.norm()).collect();
                         let mean: f64 = amps.iter().sum::<f64>() / amps.len() as f64;
                         let max = amps.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                         let min = amps.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -252,33 +253,29 @@ fn main() {
                 }
             }
         } else if cli.correlate {
-            // Single-channel correlation on the full baseband
+            // Single-channel correlation with multi-integration support
             let t0 = Instant::now();
             let int_time = if cli.integration_time > 0.0 {
                 cli.integration_time
             } else {
-                bb.num_samples() as f64 / bb.sample_rate // all available
+                bb.num_samples() as f64 / bb.sample_rate
             };
-            let vis = correlator::correlate_channel(&bb.data, bb.sample_rate, int_time);
+            let multi = correlator::correlate_channel_multi(&bb.data, bb.sample_rate, int_time);
             let corr_elapsed = t0.elapsed();
 
-            println!("\nCorrelation (single channel, {:.3} s integration):", int_time);
+            let n_int = multi.len();
+            let n_bl = multi.first().map(|v| v.len()).unwrap_or(0);
+            println!("\nCorrelation (single channel × {n_int} integrations, {:.3} s each):", int_time);
             println!("Correlation took {:?}", corr_elapsed);
-            println!("Baselines: {}", vis.len());
+            println!("Baselines per integration: {n_bl}");
 
             // Save to HDF5 if requested
             if let Some(ref save_path) = cli.save_vis {
-                let ant_pos_path = cli.antenna_positions.as_ref().unwrap();
-                match save_visibilities(save_path, &obs, &vis, bb.sample_rate, ant_pos_path) {
-                    Ok(()) => {
-                        println!("Visibilities saved to {save_path}");
-                        print_h5_summary(save_path);
-                    }
-                    Err(e) => eprintln!("Failed to save visibilities: {e}"),
-                }
+                save_vis_multi(save_path, &obs, &multi, bb.sample_rate, cli.antenna_positions.as_ref().unwrap());
+                print_h5_summary(save_path);
             } else {
-                println!("\nVisibilities (amplitude, phase):");
-                for v in &vis {
+                println!("\nVisibilities (amplitude, phase) — integration 0:");
+                for v in &multi[0] {
                     let amp = v.value.norm();
                     let phase = v.value.arg();
                     let vv_re = correlator::van_vleck_correction(v.value.re);
@@ -321,32 +318,36 @@ fn main() {
     }
 }
 
-/// Helper: extract visibilities and save to HDF5.
-fn save_visibilities(
+/// Helper: save multi-integration visibilities to HDF5.
+fn save_vis_multi(
     path: &str,
     obs: &Observation,
-    vis: &[tart_correlator::correlator::Visibility],
+    multi: &[Vec<tart_correlator::correlator::Visibility>],
     channel_width_hz: f64,
     ant_pos_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let ant_pos = visibility::load_antenna_positions(ant_pos_path)?;
-    let vis_values: Vec<Complex64> = vis.iter().map(|v| v.value).collect();
-    let bl_pairs: Vec<_> = vis.iter().map(|v| (v.i, v.j)).collect();
+) {
+    let ant_pos = visibility::load_antenna_positions(ant_pos_path)
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to load antenna positions: {e}");
+            std::process::exit(1);
+        });
     let ts = obs.timestamp.to_rfc3339();
 
-    // Wrap as 3D: [1 channel, 1 integration, n_baselines]
-    let vis_3d = vec![vec![vis_values]];
+    let bl_pairs: Vec<_> = multi[0].iter().map(|v| (v.i, v.j)).collect();
 
-    visibility::write_visibilities_hdf5(
-        path,
-        &obs.config,
-        &ts,
-        &bl_pairs,
-        &vis_3d,
-        channel_width_hz,
-        &ant_pos,
-    )?;
-    Ok(())
+    // Build 3D: [1 channel][N_int integrations][N_bl baselines]
+    let vis_3d: Vec<Vec<Vec<Complex64>>> = vec![multi
+        .iter()
+        .map(|vis| vis.iter().map(|v| v.value).collect())
+        .collect()];
+
+    if let Err(e) = visibility::write_visibilities_hdf5(
+        path, &obs.config, &ts, &bl_pairs, &vis_3d, channel_width_hz, &ant_pos,
+    ) {
+        eprintln!("Failed to save visibilities: {e}");
+    } else {
+        println!("Visibilities saved to {path}");
+    }
 }
 
 /// Print a summary of all datasets in an HDF5 file.

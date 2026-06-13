@@ -27,56 +27,56 @@ pub fn baselines(num_antennas: usize) -> Vec<(usize, usize)> {
     bl
 }
 
-/// Correlate all antennas for a single channel over a given integration time.
+/// Correlate all antennas over multiple sequential integration windows.
 ///
-/// # Arguments
-/// * `antenna_data` — per-antenna complex samples for one channel:
-///   `antenna_data[ant][sample]`
-/// * `sample_rate` — sample rate in Hz
-/// * `integration_time_s` — integration time in seconds
+/// Divides the data into integration windows of `integration_time_s` seconds
+/// each and returns one `Vec<Visibility>` per window.
 ///
-/// Returns one `Visibility` per baseline.
-pub fn correlate_channel(
+/// Returns `Vec<Vec<Visibility>>` where the outer Vec is per-integration
+/// (length N_int) and the inner Vec is per-baseline (length N_bl).
+pub fn correlate_channel_multi(
     antenna_data: &[Vec<Complex64>],
     sample_rate: f64,
     integration_time_s: f64,
-) -> Vec<Visibility> {
+) -> Vec<Vec<Visibility>> {
     let num_antennas = antenna_data.len();
     if num_antennas < 2 {
         return Vec::new();
     }
 
     let n_total = antenna_data[0].len();
-    let n_int = (sample_rate * integration_time_s).round() as usize;
-    let n_int = n_int.min(n_total);
-
-    // Use the last n_int samples for integration
-    let start = n_total.saturating_sub(n_int);
+    let n_per = (sample_rate * integration_time_s).round() as usize;
+    let n_per = n_per.min(n_total).max(1);
+    let n_int = n_total / n_per;
 
     let bl_pairs = baselines(num_antennas);
 
-    let visibilities: Vec<Visibility> = bl_pairs
-        .par_iter()
-        .map(|&(i, j): &(usize, usize)| {
-            let xi = &antenna_data[i][start..];
-            let xj = &antenna_data[j][start..];
+    (0..n_int)
+        .into_par_iter()
+        .map(|i_win| {
+            let start = i_win * n_per;
+            bl_pairs
+                .iter()
+                .map(|&(i, j)| {
+                    let xi = &antenna_data[i][start..][..n_per];
+                    let xj = &antenna_data[j][start..][..n_per];
 
-            let mut sum = Complex64::new(0.0, 0.0);
-            for k in 0..n_int {
-                sum += xi[k] * xj[k].conj();
-            }
-            let value = sum / n_int as f64;
+                    let mut sum = Complex64::new(0.0, 0.0);
+                    for k in 0..n_per {
+                        sum += xi[k] * xj[k].conj();
+                    }
+                    let value = sum / n_per as f64;
 
-            Visibility {
-                i,
-                j,
-                value,
-                n_samples: n_int,
-            }
+                    Visibility {
+                        i,
+                        j,
+                        value,
+                        n_samples: n_per,
+                    }
+                })
+                .collect()
         })
-        .collect();
-
-    visibilities
+        .collect()
 }
 
 /// Apply van Vleck correction for 1-bit quantization.
@@ -114,15 +114,33 @@ mod tests {
             (0..n).map(|i| Complex64::new((i as f64).sin(), 0.0)).collect::<Vec<_>>(),
         ];
 
-        let vis = correlate_channel(&data, 100.0, 10.0);
+        let multi = correlate_channel_multi(&data, 100.0, 10.0);
+        assert_eq!(multi.len(), 1);
+        let vis = &multi[0];
         assert_eq!(vis.len(), 1);
         assert!(vis[0].value.re > 0.0);
         assert!(vis[0].value.im.abs() < 0.1);
     }
 
     #[test]
+    fn test_correlate_channel_multi_windows() {
+        // 2000 samples at 100 Hz = 20s; 5s integration = 4 windows
+        let n = 2000;
+        let data = vec![
+            (0..n).map(|i| Complex64::new((i as f64).sin(), 0.0)).collect::<Vec<_>>(),
+            (0..n).map(|i| Complex64::new((i as f64).sin(), 0.0)).collect::<Vec<_>>(),
+        ];
+
+        let multi = correlate_channel_multi(&data, 100.0, 5.0);
+        assert_eq!(multi.len(), 4, "should have 4 integration windows");
+        for vis in &multi {
+            assert_eq!(vis.len(), 1);
+            assert!(vis[0].value.re > 0.0);
+        }
+    }
+
+    #[test]
     fn test_correlate_channel_quadrature() {
-        // 90° phase shift between antennas → correlation should be imaginary
         let n = 4000;
         let data = vec![
             (0..n).map(|i| {
@@ -135,9 +153,10 @@ mod tests {
             }).collect::<Vec<_>>(),
         ];
 
-        let vis = correlate_channel(&data, 100.0, 40.0);
+        let multi = correlate_channel_multi(&data, 100.0, 40.0);
+        assert_eq!(multi.len(), 1);
+        let vis = &multi[0];
         assert_eq!(vis.len(), 1);
-        // After 90° shift, correlation should be imaginary: ⟨e^{jθ} · e^{-j(θ+π/2)}⟩ = e^{-jπ/2} = -j
         assert!(vis[0].value.im < -0.9);
         assert!(vis[0].value.re.abs() < 0.1);
     }
